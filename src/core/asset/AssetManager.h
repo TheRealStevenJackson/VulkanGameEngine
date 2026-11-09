@@ -78,6 +78,9 @@ public:
 	VulkanContext& context() { return mContext; }
 	const VulkanContext& context() const { return mContext; }
 
+	ImageLoader& imageLoader() { return m_imageLoader; }
+	const ImageLoader& imageLoader() const { return m_imageLoader; }
+
 	/**
 	 * Register an externally-created mesh (e.g. from glTF). Returns the new MeshId.
 	 */

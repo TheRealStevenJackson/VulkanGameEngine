@@ -7,8 +7,10 @@
 #include <platform/graphics/vulkan/VulkanCommandBuffer.h>
 #include <vulkan/vulkan.h>
 #include <vma/vk_mem_alloc.h>
+#include <algorithm>
 #include <cstring>
 #include <iostream>
+#include <vector>
 
 namespace core {
 
@@ -283,22 +285,36 @@ void Renderer::renderFrame() {
 	cmd.setViewport(m_swapchain->getExtent());
 	cmd.setScissor(m_swapchain->getExtent());
 
+	struct SortedModelDraw {
+		uint32_t handle;
+		const RenderProxyEntry* entry;
+	};
+
+	const auto& modelProxies = m_renderScene->models();
+	std::vector<SortedModelDraw> sortedModels;
+	sortedModels.reserve(modelProxies.size());
+	for (const auto& [handle, entry] : modelProxies)
+		sortedModels.push_back({ handle, &entry });
+
+	std::sort(sortedModels.begin(), sortedModels.end(),
+		[](const SortedModelDraw& a, const SortedModelDraw& b) {
+			if (a.entry->materialId != b.entry->materialId)
+				return a.entry->materialId < b.entry->materialId;
+			return a.handle < b.handle;
+		});
+
+	const uint32_t modelCount = static_cast<uint32_t>(std::min(sortedModels.size(), static_cast<size_t>(kMaxModelProxies)));
+
 	// Upload all model matrices into the dynamic UBO at aligned offsets (clamp to buffer capacity)
-	uint32_t modelIndex = 0;
-	for (const auto& [handle, entry] : m_renderScene->models()) {
-		if (modelIndex >= kMaxModelProxies)
-			break;
+	for (uint32_t modelIndex = 0; modelIndex < modelCount; ++modelIndex) {
+		const RenderProxyEntry& entry = *sortedModels[modelIndex].entry;
 		core::ModelUBO modelUbo;
 		modelUbo.model = entry.transform.matrix();
 		m_modelUBO->upload(modelIndex * static_cast<VkDeviceSize>(m_modelDynamicAlignment), &modelUbo, sizeof(modelUbo));
-		++modelIndex;
 	}
-	const uint32_t modelCount = modelIndex;
 
-	modelIndex = 0;
-	for (const auto& [handle, entry] : m_renderScene->models()) {
-		if (modelIndex >= modelCount)
-			break;
+	for (uint32_t modelIndex = 0; modelIndex < modelCount; ++modelIndex) {
+		const RenderProxyEntry& entry = *sortedModels[modelIndex].entry;
 		Material* material = (entry.materialId != InvalidMaterialId)
 			? m_assetManager->getMaterial(entry.materialId) : nullptr;
 
@@ -321,7 +337,6 @@ void Renderer::renderFrame() {
 				}
 			}
 		}
-		++modelIndex;
 	}
 
 	cmd.endRenderPass();

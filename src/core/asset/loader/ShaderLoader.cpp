@@ -3,10 +3,16 @@
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <filesystem>
+//#include <Windows.h>
 
 std::vector<char> ShaderLoader::readFile(const std::string& filepath) {
 	std::ifstream file(filepath, std::ios::ate | std::ios::binary);
 	if (!file.is_open()) {
+		/*void* stack[100];
+		unsigned short frames = CaptureStackBackTrace(0, 100, stack, NULL);
+		std::cout << "Captured " << frames << " frames.\n";*/
+		std::cout << "CWD: " << std::filesystem::current_path().string() << std::endl;
 		throw std::runtime_error("Failed to open shader file: " + filepath);
 	}
 	size_t filesize = static_cast<size_t>(file.tellg());

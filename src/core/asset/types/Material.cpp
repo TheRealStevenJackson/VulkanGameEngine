@@ -35,8 +35,9 @@ Material::Material(VulkanContext& context)
     );
     
     // Load default PBR shaders
-    std::vector<char> vertCode = ShaderLoader::readFile("../../spv/pbr.vert.spv");
-    std::vector<char> fragCode = ShaderLoader::readFile("../../spv/pbr.frag.spv");
+	std::cout << "CWD: " << std::filesystem::current_path().string() << std::endl;
+    std::vector<char> vertCode = ShaderLoader::readFile("spv/pbr.vert.spv");
+    std::vector<char> fragCode = ShaderLoader::readFile("spv/pbr.frag.spv");
     mVertexShader = std::make_unique<VulkanShaderModule>(context, vertCode);
     mFragmentShader = std::make_unique<VulkanShaderModule>(context, fragCode);
 }

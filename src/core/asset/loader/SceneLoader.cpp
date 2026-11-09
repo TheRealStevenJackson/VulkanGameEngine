@@ -1,7 +1,9 @@
 #include "core/asset/loader/SceneLoader.h"
 #include "core/asset/AssetManager.h"
+#include "core/asset/loader/ImageLoader.h"
 #include "core/asset/types/Mesh.h"
 #include "core/asset/types/Material.h"
+#include "core/asset/types/Texture.h"
 
 #include <fastgltf/core.hpp>
 #include <fastgltf/types.hpp>
@@ -15,10 +17,161 @@
 #include <cstring>
 #include <iostream>
 #include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
 #include <variant>
 #include <vector>
 
 namespace {
+
+struct EncodedImageBytes {
+	const uint8_t* data = nullptr;
+	std::size_t size = 0;
+};
+
+std::optional<EncodedImageBytes> bufferDataSpan(const fastgltf::Asset& asset, std::size_t bufferIndex) {
+	if (bufferIndex >= asset.buffers.size())
+		return std::nullopt;
+	const auto& buffer = asset.buffers[bufferIndex];
+	return std::visit(fastgltf::visitor{
+		[](const std::monostate&) -> std::optional<EncodedImageBytes> { return std::nullopt; },
+		[](const fastgltf::sources::BufferView&) -> std::optional<EncodedImageBytes> { return std::nullopt; },
+		[](const fastgltf::sources::URI&) -> std::optional<EncodedImageBytes> { return std::nullopt; },
+		[](const fastgltf::sources::CustomBuffer&) -> std::optional<EncodedImageBytes> { return std::nullopt; },
+		[](const fastgltf::sources::Fallback&) -> std::optional<EncodedImageBytes> { return std::nullopt; },
+		[](const fastgltf::sources::Array& arr) -> std::optional<EncodedImageBytes> {
+			return EncodedImageBytes{
+				reinterpret_cast<const uint8_t*>(arr.bytes.data()), arr.bytes.size()};
+		},
+		[](const fastgltf::sources::Vector& vec) -> std::optional<EncodedImageBytes> {
+			return EncodedImageBytes{
+				reinterpret_cast<const uint8_t*>(vec.bytes.data()), vec.bytes.size()};
+		},
+		[](const fastgltf::sources::ByteView& view) -> std::optional<EncodedImageBytes> {
+			return EncodedImageBytes{
+				reinterpret_cast<const uint8_t*>(view.bytes.data()), view.bytes.size()};
+		},
+	}, buffer.data);
+}
+
+std::optional<EncodedImageBytes> encodedGltfImageBytes(const fastgltf::Asset& asset, std::size_t imageIndex) {
+	if (imageIndex >= asset.images.size())
+		return std::nullopt;
+	const auto& image = asset.images[imageIndex];
+	return std::visit(fastgltf::visitor{
+		[](const std::monostate&) -> std::optional<EncodedImageBytes> { return std::nullopt; },
+		[&](const fastgltf::sources::BufferView& view) -> std::optional<EncodedImageBytes> {
+			if (view.bufferViewIndex >= asset.bufferViews.size())
+				return std::nullopt;
+			const auto& bufferView = asset.bufferViews[view.bufferViewIndex];
+			auto bufferSpan = bufferDataSpan(asset, bufferView.bufferIndex);
+			if (!bufferSpan)
+				return std::nullopt;
+			const std::size_t end = bufferView.byteOffset + bufferView.byteLength;
+			if (end > bufferSpan->size)
+				return std::nullopt;
+			return EncodedImageBytes{bufferSpan->data + bufferView.byteOffset, bufferView.byteLength};
+		},
+		[](const fastgltf::sources::Array& arr) -> std::optional<EncodedImageBytes> {
+			return EncodedImageBytes{
+				reinterpret_cast<const uint8_t*>(arr.bytes.data()), arr.bytes.size()};
+		},
+		[](const fastgltf::sources::Vector& vec) -> std::optional<EncodedImageBytes> {
+			return EncodedImageBytes{
+				reinterpret_cast<const uint8_t*>(vec.bytes.data()), vec.bytes.size()};
+		},
+		[](const fastgltf::sources::ByteView& view) -> std::optional<EncodedImageBytes> {
+			return EncodedImageBytes{
+				reinterpret_cast<const uint8_t*>(view.bytes.data()), view.bytes.size()};
+		},
+		[](const fastgltf::sources::URI&) -> std::optional<EncodedImageBytes> { return std::nullopt; },
+		[](const fastgltf::sources::CustomBuffer&) -> std::optional<EncodedImageBytes> { return std::nullopt; },
+		[](const fastgltf::sources::Fallback&) -> std::optional<EncodedImageBytes> { return std::nullopt; },
+	}, image.data);
+}
+
+std::optional<std::size_t> gltfTextureImageIndex(const fastgltf::Asset& asset, std::size_t textureIndex) {
+	if (textureIndex >= asset.textures.size())
+		return std::nullopt;
+	const auto& texture = asset.textures[textureIndex];
+	if (!texture.imageIndex.has_value())
+		return std::nullopt;
+	return *texture.imageIndex;
+}
+
+std::string gltfImageLabel(const fastgltf::Asset& asset, std::size_t imageIndex, std::string_view role) {
+	std::string label = std::string(role) + "#" + std::to_string(imageIndex);
+	if (imageIndex < asset.images.size() && !asset.images[imageIndex].name.empty())
+		label = asset.images[imageIndex].name;
+	return label;
+}
+
+std::unique_ptr<Texture> loadGltfImageTexture(
+	VulkanContext& ctx,
+	ImageLoader& imageLoader,
+	const fastgltf::Asset& asset,
+	std::size_t imageIndex,
+	std::string_view role,
+	VkFormat format)
+{
+	auto bytes = encodedGltfImageBytes(asset, imageIndex);
+	if (!bytes)
+		return nullptr;
+	LoadedImage loaded = imageLoader.loadImageFromMemory(
+		bytes->data, bytes->size, gltfImageLabel(asset, imageIndex, role), format);
+	if (!loaded.image)
+		return nullptr;
+	return std::make_unique<Texture>(ctx, std::move(loaded.image), gltfImageLabel(asset, imageIndex, role));
+}
+
+void applyGltfMaterialTextures(
+	Material& material,
+	const fastgltf::Material& gltfMat,
+	const fastgltf::Asset& asset,
+	VulkanContext& ctx,
+	ImageLoader& imageLoader)
+{
+	const auto& pbr = gltfMat.pbrData;
+
+	auto assignTexture = [&](std::size_t textureIndex, auto setter, std::string_view role, VkFormat format) {
+		const auto imageIndex = gltfTextureImageIndex(asset, textureIndex);
+		if (!imageIndex)
+			return;
+		if (auto texture = loadGltfImageTexture(ctx, imageLoader, asset, *imageIndex, role, format))
+			setter(std::move(texture));
+	};
+
+	if (pbr.baseColorTexture.has_value())
+		assignTexture(pbr.baseColorTexture->textureIndex,
+			[&](std::unique_ptr<Texture> tex) { material.setAlbedoMap(std::move(tex)); },
+			"baseColor", VK_FORMAT_R8G8B8A8_SRGB);
+
+	if (pbr.metallicRoughnessTexture.has_value()) {
+		const auto imageIndex = gltfTextureImageIndex(asset, pbr.metallicRoughnessTexture->textureIndex);
+		if (imageIndex) {
+			auto bytes = encodedGltfImageBytes(asset, *imageIndex);
+			if (bytes) {
+				const std::string label = gltfImageLabel(asset, *imageIndex, "metallicRoughness");
+				auto split = imageLoader.loadMetallicRoughnessFromMemory(bytes->data, bytes->size, label);
+				if (split.metallic)
+					material.setMetallicMap(std::make_unique<Texture>(ctx, std::move(split.metallic), label + ".metallic"));
+				if (split.roughness)
+					material.setRoughnessMap(std::make_unique<Texture>(ctx, std::move(split.roughness), label + ".roughness"));
+			}
+		}
+	}
+
+	if (gltfMat.normalTexture.has_value())
+		assignTexture(gltfMat.normalTexture->textureIndex,
+			[&](std::unique_ptr<Texture> tex) { material.setNormalMap(std::move(tex)); },
+			"normal", VK_FORMAT_R8G8B8A8_UNORM);
+
+	if (gltfMat.occlusionTexture.has_value())
+		assignTexture(gltfMat.occlusionTexture->textureIndex,
+			[&](std::unique_ptr<Texture> tex) { material.setAoMap(std::move(tex)); },
+			"occlusion", VK_FORMAT_R8G8B8A8_UNORM);
+}
 
 // Vertex layout matching MeshLoader (pos, normal, texCoord, tangent, bitangent).
 struct Vertex {
@@ -133,8 +286,9 @@ std::optional<Scene> SceneLoader::loadGLB(AssetManager* assetManager, const std:
 		return std::nullopt;
 
 	fastgltf::Parser parser(fastgltf::Extensions::None);
+	constexpr auto gltfLoadOptions = fastgltf::Options::LoadGLBBuffers | fastgltf::Options::LoadExternalBuffers;
 	auto assetResult = parser.loadGltf(bufferResult.get(), path.parent_path(),
-		fastgltf::Options::None, fastgltf::Category::OnlyRenderable);
+		gltfLoadOptions, fastgltf::Category::OnlyRenderable);
 
 	if (!assetResult)
 		return std::nullopt;
@@ -165,7 +319,9 @@ std::optional<Scene> SceneLoader::loadGLB(AssetManager* assetManager, const std:
 		defaultMat->setRoughness(0.5f);
 		defaultMaterialId = assetManager->addMaterial(std::move(defaultMat));
 
-		// One Material per glTF material (PBR base color, metallic, roughness).
+		ImageLoader& imageLoader = assetManager->imageLoader();
+
+		// One Material per glTF material (PBR factors + embedded textures).
 		for (const auto& gltfMat : asset.materials) {
 			auto mat = std::make_unique<Material>(ctx);
 			const auto& pbr = gltfMat.pbrData;
@@ -174,6 +330,7 @@ std::optional<Scene> SceneLoader::loadGLB(AssetManager* assetManager, const std:
 			mat->setMetallic(static_cast<float>(pbr.metallicFactor));
 			mat->setRoughness(static_cast<float>(pbr.roughnessFactor));
 			mat->setAo(1.0f);
+			applyGltfMaterialTextures(*mat, gltfMat, asset, ctx, imageLoader);
 			materialIdByGltfIndex.push_back(assetManager->addMaterial(std::move(mat)));
 		}
 

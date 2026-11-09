@@ -3,8 +3,11 @@
 #include "platform/graphics/vulkan/VulkanContext.h"
 #include "platform/graphics/vulkan/VulkanImage.h"
 
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vulkan/vulkan.h>
 
 // Structure containing image, image view, and sampler for a loaded texture
@@ -76,12 +79,31 @@ public:
 	LoadedImage loadImage(const std::string& filepath);
 
 	/**
+	 * Decode embedded image bytes (e.g. from glTF buffer views) and upload to the GPU.
+	 * \a debugLabel is used only for logging.
+	 */
+	LoadedImage loadImageFromMemory(const uint8_t* data, std::size_t size, const std::string& debugLabel = {},
+		VkFormat format = VK_FORMAT_R8G8B8A8_SRGB);
+
+	/** glTF metallic-roughness combined map: metallic = B channel, roughness = G channel (replicated to R for sampling). */
+	struct MetallicRoughnessImages {
+		std::unique_ptr<VulkanImage> metallic;
+		std::unique_ptr<VulkanImage> roughness;
+	};
+	MetallicRoughnessImages loadMetallicRoughnessFromMemory(
+		const uint8_t* data, std::size_t size, const std::string& debugLabel = {});
+
+	/**
 	 * Create a 1x1 white texture (RGBA = 1.0, 1.0, 1.0, 1.0).
 	 * Returns nullptr on failure.
 	 */
 	std::unique_ptr<VulkanImage> createWhiteTexture();
 
 private:
+	LoadedImage uploadRgbaPixels(int width, int height, const uint8_t* rgbaPixels, const std::string& debugLabel,
+		VkFormat format = VK_FORMAT_R8G8B8A8_SRGB);
+	std::unique_ptr<VulkanImage> uploadRgbaPixelsToImage(int width, int height, const uint8_t* rgbaPixels,
+		VkFormat format = VK_FORMAT_R8G8B8A8_SRGB);
 	VkSampler createSampler(VulkanContext& context);
 
 	VulkanContext& mContext;
